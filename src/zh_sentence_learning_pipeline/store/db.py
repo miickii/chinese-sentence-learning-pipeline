@@ -9,11 +9,11 @@ How it fits:
 - Bootstrapper initializes the DB and writes:
   - sentences (jieba tokens + HSK tokens + char tokens + patterns + skeleton)
   - vocab_stats (based on HSK tokens)
-  - pattern_stats + realizations (grammar Layer B+C)
+  - pattern_personal_stats + realizations (grammar Layer B+C)
   - meta (schema version + config + timestamps)
 
 Notes:
-- We keep schema stable (SCHEMA_VERSION=2).
+- We keep schema stable (SCHEMA_VERSION=3).
 - New config is stored in meta (anchors_json, extractor toggles, etc.).
 """
 
@@ -22,7 +22,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 DDL = """
 PRAGMA journal_mode=WAL;
@@ -57,19 +57,21 @@ CREATE TABLE IF NOT EXISTS vocab_stats (
   hsk_frequency INTEGER
 );
 
-CREATE TABLE IF NOT EXISTS pattern_stats (
-  pattern_id TEXT PRIMARY KEY,
-  count INTEGER NOT NULL,
-  mastery REAL NOT NULL,
-  diversity INTEGER NOT NULL,
+CREATE TABLE IF NOT EXISTS pattern_personal_stats (
+  pattern_key TEXT PRIMARY KEY,
+  family TEXT NOT NULL,
+  count_seen INTEGER NOT NULL,
+  distinct_sentence_count INTEGER NOT NULL,
   emerged INTEGER NOT NULL,
-  last_seen TEXT
+  last_seen_at TEXT
 );
 
-CREATE TABLE IF NOT EXISTS pattern_realizations (
-  pattern_id TEXT NOT NULL,
+CREATE INDEX IF NOT EXISTS idx_pattern_personal_family ON pattern_personal_stats(family);
+
+CREATE TABLE IF NOT EXISTS pattern_personal_realizations (
+  pattern_key TEXT NOT NULL,
   realization TEXT NOT NULL,
-  PRIMARY KEY (pattern_id, realization)
+  PRIMARY KEY (pattern_key, realization)
 );
 
 CREATE TABLE IF NOT EXISTS runs (

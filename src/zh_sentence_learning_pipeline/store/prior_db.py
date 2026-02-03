@@ -4,7 +4,7 @@ store/prior_db.py
 SQLite schema + helpers for the GLOBAL grammar prior database.
 
 This DB is built from a huge corpus (e.g., 1M sentences) and stores:
-- pattern_global_stats: global counts + (sampled) diversity
+- pattern_global_stats: global counts (sentence DF + occurrences) + sample diversity
 - pattern_global_realizations: example realizations per pattern (capped)
 
 This DB is NOT learner-specific.
@@ -15,7 +15,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-PRIOR_SCHEMA_VERSION = 1
+PRIOR_SCHEMA_VERSION = 2
 
 DDL = """
 PRAGMA journal_mode=WAL;
@@ -28,19 +28,21 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 CREATE TABLE IF NOT EXISTS pattern_global_stats (
-  pattern_id TEXT PRIMARY KEY,
-  count      INTEGER NOT NULL,
-  diversity  INTEGER NOT NULL,
-  log_freq   REAL NOT NULL
+  pattern_key TEXT PRIMARY KEY,
+  family TEXT NOT NULL,
+  count_sentences INTEGER NOT NULL,
+  count_occurrences INTEGER NOT NULL,
+  distinct_realization_count INTEGER NOT NULL,
+  p_global REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS pattern_global_realizations (
-  pattern_id   TEXT NOT NULL,
+  pattern_key   TEXT NOT NULL,
   realization  TEXT NOT NULL,
-  PRIMARY KEY (pattern_id, realization)
+  PRIMARY KEY (pattern_key, realization)
 );
 
-CREATE INDEX IF NOT EXISTS idx_pgs_count ON pattern_global_stats(count);
+CREATE INDEX IF NOT EXISTS idx_pgs_count_sentences ON pattern_global_stats(count_sentences);
 """
 
 

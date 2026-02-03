@@ -52,10 +52,22 @@ from collections import Counter
 from typing import Iterable, List, Set, Tuple
 import re
 
+from .pattern_key import (
+    key_anchor_pair,
+    key_anchor_sequence,
+    key_anchor_skip,
+    key_anchor_span,
+    key_anchor_window,
+    key_compressed_skeleton,
+    key_skeleton,
+    key_span_signature,
+    key_token_ngram,
+)
+
 
 @dataclass(frozen=True)
 class Pattern:
-    pattern_id: str
+    pattern_key: str
     realization: str
 
 
@@ -190,20 +202,22 @@ def _anchor_skipgrams(
     tokens: List[str],
     anchors: Set[str],
     max_jump: int = 10,
+    add_bigrams: bool = True,
     add_trigrams: bool = True,
 ) -> list[Pattern]:
     extracted: list[Pattern] = []
     seq = _anchor_sequence(tokens, anchors)
 
     # 2-anchor skip-grams
-    for a in range(len(seq)):
-        A1, i1 = seq[a]
-        for b in range(a + 1, len(seq)):
-            A2, i2 = seq[b]
-            if i2 - i1 > max_jump:
-                break
-            pid = f"a_skip2:j{max_jump}:{A1}|{A2}"
-            extracted.append(Pattern(pid, f"{A1} ... {A2}"))
+    if add_bigrams:
+        for a in range(len(seq)):
+            A1, i1 = seq[a]
+            for b in range(a + 1, len(seq)):
+                A2, i2 = seq[b]
+                if i2 - i1 > max_jump:
+                    break
+                pkey = key_anchor_skip([A1, A2], max_jump=max_jump)
+                extracted.append(Pattern(pkey, f"{A1} ... {A2}"))
 
     # 3-anchor skip-grams
     if add_trigrams:
@@ -217,8 +231,8 @@ def _anchor_skipgrams(
                     A3, i3 = seq[c]
                     if i3 - i2 > max_jump:
                         break
-                    pid = f"a_skip3:j{max_jump}:{A1}|{A2}|{A3}"
-                    extracted.append(Pattern(pid, f"{A1} ... {A2} ... {A3}"))
+                    pkey = key_anchor_skip([A1, A2, A3], max_jump=max_jump)
+                    extracted.append(Pattern(pkey, f"{A1} ... {A2} ... {A3}"))
 
     return extracted
 
@@ -252,10 +266,10 @@ def _anchor_span_patterns(
         gap = (tail_pos - i - 1) if tail_pos is not None else min(max_gap, n - i - 1)
         gapb = _bucket_gap(gap)
 
-        pid = f"anch_span:{t}:gap={gapb}:tail={tail}"
+        pkey = key_anchor_span(t, tail, gapb)
         end = (tail_pos + 1) if tail_pos is not None else j_limit
         realization = " ".join(tokens[i:end])
-        extracted.append(Pattern(pid, realization))
+        extracted.append(Pattern(pkey, realization))
 
     return extracted
 
@@ -294,9 +308,9 @@ def _span_signature_patterns(
         gap = len(inside)
         gapb = _bucket_gap(gap)
 
-        pid = f"span_sig:{t}:gap={gapb}:kA={kA}:kX={kX}:tail={tail}"
+        pkey = key_span_signature(t, tail, gapb, kA=kA, kX=kX)
         realization = " ".join(tokens[i : (tail_pos + 1 if tail_pos is not None else j_limit)])
-        extracted.append(Pattern(pid, realization))
+        extracted.append(Pattern(pkey, realization))
 
     return extracted
 
@@ -325,9 +339,9 @@ def _anchor_pair_patterns(
             gap = i2 - i1 - 1
             if gap > max_gap:
                 break  # indices increase, so further anchors only increase gap
-            pid = f"anch_pair:{A1}->{A2}:gap={_bucket_gap(gap)}"
+            pkey = key_anchor_pair(A1, A2, _bucket_gap(gap))
             realization = " ".join(tokens[i1 : i2 + 1])
-            extracted.append(Pattern(pid, realization))
+            extracted.append(Pattern(pkey, realization))
 
     return extracted
 
@@ -344,8 +358,8 @@ def _anchor_sequence_signature(
     seq = [t for t in tokens if t in anchors]
     if len(seq) < 2:
         return []
-    pid = "anch_seq:" + "->".join(seq)
-    return [Pattern(pid, " ".join(seq))]
+    pkey = key_anchor_sequence(seq)
+    return [Pattern(pkey, " ".join(seq))]
 
 
 # -------------------------
@@ -357,60 +371,80 @@ def extract_patterns_from_tokens(
     anchors: Set[str],
     max_ngram_n: int = 4,
     # toggles
+    add_tok_ngrams: bool = False,
+    add_anchor_windows: bool = True,
+    add_skeleton: bool = True,
     add_compressed_skeleton: bool = True,
-    add_span_patterns: bool = True,
-    add_span_signatures: bool = True,
-    add_anchor_skipgrams: bool = True,
-    add_anchor_pairs: bool = True,          # NEW
-    add_anchor_sequence: bool = True,       # NEW
+    add_anchor_pairs: bool = True,
+    add_anchor_skip2: bool = False,
+    add_anchor_skip3: bool = False,
+    add_anchor_sequence: bool = False,
+    add_anchor_spans: bool = False,
+    add_span_signatures: bool = False,
     # params
     span_max_gap: int = 20,
     skip_max_jump: int = 10,
-    skip_add_trigrams: bool = True,
 ) -> tuple[list[Pattern], str]:
     extracted: list[Pattern] = []
 
     # 1) token n-grams (anchor-specific slots to avoid mega collapse)
-    def slot(tok: str) -> str:
-        return f"<A:{tok}>" if tok in anchors else "<X>"
+    if add_tok_ngrams:
+        def slot(tok: str) -> str:
+            return tok if tok in anchors else "<X>"
 
-    for n in range(2, max_ngram_n + 1):
-        for ng in ngrams(tokens, n):
-            if any(t in anchors for t in ng):
-                pid = f"tok_ng:{n}:" + "|".join(slot(t) for t in ng)
-                extracted.append(Pattern(pid, "|".join(ng)))
+        for n in range(2, max_ngram_n + 1):
+            for ng in ngrams(tokens, n):
+                if any(t in anchors for t in ng):
+                    sig = " ".join(slot(t) for t in ng)
+                    anchors_in_order = [t for t in ng if t in anchors]
+                    pkey = key_token_ngram(sig, anchors_in_order, n=n)
+                    extracted.append(Pattern(pkey, " ".join(ng)))
 
     # 2) anchor window patterns (±2)
-    def ph(x: str) -> str:
-        return x if x in anchors else "<X>"
+    if add_anchor_windows:
+        def ph(x: str) -> str:
+            return x if x in anchors else "<X>"
 
-    for i, t in enumerate(tokens):
-        if t in anchors:
-            left = tokens[max(0, i - 2) : i]
-            right = tokens[i + 1 : i + 3]
-            pid = f"anch_win:{ph(t)}:{len(left)}:{len(right)}:" + ",".join([ph(x) for x in left + right])
-            extracted.append(Pattern(pid, " ".join(left + [t] + right)))
+        for i, t in enumerate(tokens):
+            if t in anchors:
+                left = tokens[max(0, i - 2) : i]
+                right = tokens[i + 1 : i + 3]
+                sig_tokens = [ph(x) for x in left + [t] + right]
+                sig = " ".join(sig_tokens)
+                anchors_in_order = [x for x in sig_tokens if x in anchors]
+                pkey = key_anchor_window(
+                    window_sig=sig,
+                    anchors_in_order=anchors_in_order,
+                    left_len=len(left),
+                    right_len=len(right),
+                )
+                extracted.append(Pattern(pkey, " ".join(left + [t] + right)))
 
-    # 3) NEW: anchor-to-anchor pairs (any later anchor within max gap)
+    # 3) anchor-to-anchor pairs (any later anchor within max gap)
     if add_anchor_pairs:
         extracted.extend(_anchor_pair_patterns(tokens, anchors, max_gap=span_max_gap))
 
-    # 4) NEW: anchor-sequence signature (ordered anchors)
+    # 4) anchor-sequence signature (ordered anchors)
     if add_anchor_sequence:
         extracted.extend(_anchor_sequence_signature(tokens, anchors))
 
     # 5) original skeleton
     skel = skeletonize(tokens, anchors)
-    extracted.append(Pattern("skel:" + skel, " ".join(tokens)))
+    if add_skeleton:
+        anchors_in_order = [t for t in tokens if t in anchors]
+        pkey = key_skeleton(skel, anchors_in_order)
+        extracted.append(Pattern(pkey, " ".join(tokens)))
 
     # 6) compressed skeleton
     if add_compressed_skeleton:
         cskel = skeletonize_compressed(tokens, anchors)
         if cskel:
-            extracted.append(Pattern("cskel:" + cskel, " ".join(tokens)))
+            anchors_in_order = [t for t in tokens if t in anchors]
+            pkey = key_compressed_skeleton(cskel, anchors_in_order)
+            extracted.append(Pattern(pkey, " ".join(tokens)))
 
     # 7) anchor-span patterns (next-anchor)
-    if add_span_patterns:
+    if add_anchor_spans:
         extracted.extend(_anchor_span_patterns(tokens, anchors, max_gap=span_max_gap))
 
     # 8) span signatures (next-anchor + interior shape)
@@ -418,13 +452,14 @@ def extract_patterns_from_tokens(
         extracted.extend(_span_signature_patterns(tokens, anchors, max_gap=span_max_gap))
 
     # 9) anchor skip-grams (anchor-only sequence)
-    if add_anchor_skipgrams:
+    if add_anchor_skip2 or add_anchor_skip3:
         extracted.extend(
             _anchor_skipgrams(
                 tokens,
                 anchors,
                 max_jump=skip_max_jump,
-                add_trigrams=skip_add_trigrams,
+                add_bigrams=add_anchor_skip2,
+                add_trigrams=add_anchor_skip3,
             )
         )
 

@@ -1,59 +1,85 @@
 # Chinese Sentence Curriculum Generator
 
-This project builds a **self-updating, Chinese-first sentence generation system for language learning**.
+This project builds a **Chinese-first, self-updating sentence curriculum system** for language learning.
 
-The system generates high-quality Chinese sentences, verifies them using an ensemble of open-source language models, and accepts only sentences that are pedagogically useful:
-- exactly **one new Chinese vocabulary item**
-- at most **one novel grammar pattern** (discovered statistically)
-- low similarity to previously accepted sentences
+**Overall goal:** generate new Chinese sentences that introduce exactly one new vocabulary item, at most one new grammar pattern, and avoid structural repetition. This lets the curriculum adapt to what the learner already knows.
 
-After a one-time bootstrap from an existing Anki deck, the pipeline becomes the **single source of truth** and continuously updates its internal model of what the learner knows.
+**Current status (what’s implemented):**
+- Global **anchor system** (frozen anchor list derived from a 1M‑sentence corpus)
+- Pattern extraction with a stable **PatternKey** format
+- **Global prior DB** with pattern frequencies (`data/chinese_prior.db`)
+- **Personal state DB** with emerged patterns (`data/state.db`)
+- Inspection tools that validate anchors, patterns, and coverage
 
-English is generated **only after acceptance** as a gloss for display and never influences difficulty or progression.
-
----
-
-## Motivation
-
-Most language-learning systems suffer from one of two problems:
-1. Static curricula that do not adapt to what the learner actually knows
-2. Uncontrolled AI generation that introduces too much novelty at once
-
-This project addresses both by enforcing **controlled novelty**:
-> Every new sentence is mostly familiar, but introduces exactly one new thing.
-
-Grammar is not predefined or labeled. Instead, it is **discovered statistically** from real usage and tracked dynamically as the system runs.
+**Not yet implemented:**
+- Candidate sentence generation
+- Ensemble judging/verification
+- The acceptance loop
 
 ---
 
-## Core Design Principles
+## Quickstart (short)
 
-- **Chinese-first**: difficulty and novelty are computed only from Chinese
-- **No preset grammar lists**: grammar emerges from patterns in the data
-- **Rejection sampling**: models propose freely; the pipeline decides
-- **Ensemble verification**: quality is enforced by multiple models
-- **Dynamic state**: vocabulary and grammar familiarity update after every sentence
+```bash
+# 1) Build HSK DB
+PYTHONPATH=src python scripts/build_hsk_db_from_json.py \
+  --json data/complete_hsk.json \
+  --out  data/hsk_vocabulary_v2.db
+
+# 2) Build anchors (candidates -> final)
+PYTHONPATH=src python scripts/anchors/build_global_anchors.py \
+  --json data/complete_hsk.json \
+  --out  data/global_anchors.json \
+  --pos  u,p,c,y,e,d \
+  --max-len 4
+
+PYTHONPATH=src python scripts/anchors/build_final_anchors_from_corpus.py \
+  --candidates data/global_anchors.json \
+  --corpus data/processed/global_prior.sentences.txt \
+  --out data/final_anchors.json \
+  --topk 600
+
+# 3) Build global prior DB (grammar frequencies)
+PYTHONPATH=src python scripts/build_prior_db.py \
+  --corpus data/processed/global_prior.sentences.txt \
+  --anchors data/final_anchors.json \
+  --out data/chinese_prior.db
+
+# 4) Bootstrap personal state DB
+PYTHONPATH=src python main.py
+
+# 5) Inspect pipeline health
+PYTHONPATH=src python scripts/inspect_pipeline.py \
+  --prior-db data/chinese_prior.db \
+  --state-db data/state.db \
+  --anchors data/final_anchors.json
+```
 
 ---
 
-## What the System Does
+## How it works (short version)
 
-At a high level, the system runs a loop:
-
-1. Generate many candidate Chinese sentences locally
-2. Verify quality using an ensemble of judge models
-3. Filter candidates deterministically:
-   - Chinese vocabulary novelty
-   - grammar pattern novelty (Layer B + C)
-   - similarity to past sentences
-4. Accept the best candidate
-5. Update internal state (vocab + grammar)
-6. Optionally generate an English gloss
-7. Repeat
-
-This loop never stagnates and never requires manual grammar supervision.
+1. **Anchors**: a frozen set of high-coverage function-ish tokens (的/了/在/把/因为/所以/虽然/但是/如果/就…).
+2. **Pattern extraction**: each sentence yields a set of **PatternKeys** based on anchors and sentence shape.
+3. **Two DBs**:
+   - **Global prior DB**: how frequent each pattern is in real Chinese.
+   - **Personal state DB**: which patterns the learner has seen and which have emerged.
+4. **Selection logic (planned)**: only accept sentences with ≤1 new pattern, favor common patterns, and avoid structural duplicates.
 
 ---
 
-## Project Structure
+## Docs (recommended order)
+
+1. `docs/architecture.md` — system design + PatternKey spec + DB schemas
+2. `docs/anchors.md` — anchor pipeline + examples + sanity checks
+3. `docs/corpus.md` — build the 1M‑sentence corpus (exact commands)
+4. `docs/bootstrap.md` — end‑to‑end build: HSK → anchors → prior DB → state DB
+
+---
+
+## Repo structure
+
+- `src/zh_sentence_learning_pipeline/` — core library
+- `scripts/` — one‑off build/inspection tools
+- `data/` — generated artifacts (corpus, anchors, SQLite DBs)
 

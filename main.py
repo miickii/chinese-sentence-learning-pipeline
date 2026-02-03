@@ -24,7 +24,7 @@ if __name__ == "__main__":
         hsk_db_path=Path("data/hsk_vocabulary_v2.db"),
         hsk_max_level=6,
         include_level7=False,
-        anchors_top_k=120,
+        anchors_top_k=150,
         max_ngram_n=3,
         global_anchors_path="data/global_anchors.json",
         debug_print_anchors=True,

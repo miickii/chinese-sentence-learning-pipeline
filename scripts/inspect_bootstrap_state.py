@@ -82,8 +82,8 @@ EXPECTED_TABLES = {
     "meta",
     "sentences",
     "vocab_stats",
-    "pattern_stats",
-    "pattern_realizations",
+    "pattern_personal_stats",
+    "pattern_personal_realizations",
 }
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -189,19 +189,19 @@ def read_all_jieba_tokens(conn: sqlite3.Connection) -> List[List[str]]:
 
 @dataclass
 class PatternRow:
-    pattern_id: str
-    count: int
-    diversity: int
+    pattern_key: str
+    count_seen: int
+    distinct_sentence_count: int
     emerged: int
 
 def top_patterns(conn: sqlite3.Connection, limit: int = 20, emerged_only: bool = True) -> List[PatternRow]:
     if emerged_only:
         rows = conn.execute(
             """
-            SELECT pattern_id, count, diversity, emerged
-            FROM pattern_stats
+            SELECT pattern_key, count_seen, distinct_sentence_count, emerged
+            FROM pattern_personal_stats
             WHERE emerged = 1
-            ORDER BY count DESC, diversity DESC
+            ORDER BY count_seen DESC, distinct_sentence_count DESC
             LIMIT ?
             """,
             (limit,),
@@ -209,31 +209,39 @@ def top_patterns(conn: sqlite3.Connection, limit: int = 20, emerged_only: bool =
     else:
         rows = conn.execute(
             """
-            SELECT pattern_id, count, diversity, emerged
-            FROM pattern_stats
-            ORDER BY count DESC, diversity DESC
+            SELECT pattern_key, count_seen, distinct_sentence_count, emerged
+            FROM pattern_personal_stats
+            ORDER BY count_seen DESC, distinct_sentence_count DESC
             LIMIT ?
             """,
             (limit,),
         ).fetchall()
-    return [PatternRow(r["pattern_id"], int(r["count"]), int(r["diversity"]), int(r["emerged"])) for r in rows]
+    return [
+        PatternRow(
+            r["pattern_key"],
+            int(r["count_seen"]),
+            int(r["distinct_sentence_count"]),
+            int(r["emerged"]),
+        )
+        for r in rows
+    ]
 
-def sample_realizations(conn: sqlite3.Connection, pid: str, k: int = 6) -> List[str]:
+def sample_realizations(conn: sqlite3.Connection, pkey: str, k: int = 6) -> List[str]:
     rows = conn.execute(
         """
         SELECT realization
-        FROM pattern_realizations
-        WHERE pattern_id = ?
+        FROM pattern_personal_realizations
+        WHERE pattern_key = ?
         ORDER BY RANDOM()
         LIMIT ?
         """,
-        (pid, k),
+        (pkey, k),
     ).fetchall()
     return [r["realization"] for r in rows]
 
 def pattern_count_hist(conn: sqlite3.Connection) -> Counter[int]:
-    rows = conn.execute("SELECT count FROM pattern_stats").fetchall()
-    hist = Counter(int(r["count"]) for r in rows)
+    rows = conn.execute("SELECT count_seen AS c FROM pattern_personal_stats").fetchall()
+    hist = Counter(int(r["c"]) for r in rows)
     return hist
 
 
@@ -370,15 +378,20 @@ def main() -> None:
             "hsk_max_level",
             "include_level7",
             "max_ngram_n",
+            "add_tok_ngrams",
+            "add_anchor_windows",
+            "add_skeleton",
             "add_compressed_skeleton",
-            "add_span_patterns",
+            "add_anchor_pairs",
+            "add_anchor_skip2",
+            "add_anchor_skip3",
+            "add_anchor_sequence",
+            "add_anchor_spans",
             "add_span_signatures",
-            "add_anchor_skipgrams",
             "span_max_gap",
             "skip_max_jump",
-            "skip_add_trigrams",
-            "pattern_min_count",
-            "pattern_min_diversity",
+            "pattern_min_count_seen",
+            "pattern_min_distinct_sentences",
         ]:
             if k in meta:
                 print(f"  - {k}: {meta[k]}")
@@ -478,8 +491,8 @@ def main() -> None:
 
         # --- Pattern health
         print("\n=== Pattern health ===")
-        total_patterns = table_count(conn, "pattern_stats")
-        emerged_patterns = int(conn.execute("SELECT COUNT(*) AS n FROM pattern_stats WHERE emerged=1").fetchone()["n"])
+        total_patterns = table_count(conn, "pattern_personal_stats")
+        emerged_patterns = int(conn.execute("SELECT COUNT(*) AS n FROM pattern_personal_stats WHERE emerged=1").fetchone()["n"])
         print("patterns total:  ", total_patterns)
         print("patterns emerged:", emerged_patterns, f"({fmt_pct(emerged_patterns, total_patterns)})")
 
@@ -491,11 +504,14 @@ def main() -> None:
         print(f"count=2:   {c2} ({fmt_pct(c2, total_patterns)})")
         print(f"count>=5:  {c5} ({fmt_pct(c5, total_patterns)})")
 
-        print("\nTop emerged patterns (by count) with sample realizations:")
+        print("\nTop emerged patterns (by count_seen) with sample realizations:")
         tops = top_patterns(conn, limit=args.top_patterns, emerged_only=True)
         for pr in tops:
-            print(f"\n- {pr.pattern_id} | count={pr.count} diversity={pr.diversity}")
-            exs = sample_realizations(conn, pr.pattern_id, k=6)
+            print(
+                f"\n- {pr.pattern_key} | count_seen={pr.count_seen} "
+                f"distinct_sentences={pr.distinct_sentence_count}"
+            )
+            exs = sample_realizations(conn, pr.pattern_key, k=6)
             for e in exs:
                 print("    •", e)
 
@@ -527,11 +543,16 @@ def main() -> None:
             span_max_gap = args.span_max_gap if args.span_max_gap is not None else parse_int_meta(meta, "span_max_gap", 20)
             skip_max_jump = args.skip_max_jump if args.skip_max_jump is not None else parse_int_meta(meta, "skip_max_jump", 10)
 
+            add_tok_ngrams = parse_bool_meta(meta, "add_tok_ngrams", False)
+            add_anchor_windows = parse_bool_meta(meta, "add_anchor_windows", True)
+            add_skeleton = parse_bool_meta(meta, "add_skeleton", True)
             add_cskel = not args.no_cskel and parse_bool_meta(meta, "add_compressed_skeleton", True)
-            add_spans = not args.no_spans and parse_bool_meta(meta, "add_span_patterns", True)
-            add_span_sigs = not args.no_span_sigs and parse_bool_meta(meta, "add_span_signatures", True)
-            add_skips = not args.no_skipgrams and parse_bool_meta(meta, "add_anchor_skipgrams", True)
-            add_trigrams = parse_bool_meta(meta, "skip_add_trigrams", True)
+            add_anchor_pairs = parse_bool_meta(meta, "add_anchor_pairs", True)
+            add_anchor_skip2 = not args.no_skipgrams and parse_bool_meta(meta, "add_anchor_skip2", False)
+            add_anchor_skip3 = not args.no_skipgrams and parse_bool_meta(meta, "add_anchor_skip3", False)
+            add_anchor_sequence = parse_bool_meta(meta, "add_anchor_sequence", False)
+            add_anchor_spans = not args.no_spans and parse_bool_meta(meta, "add_anchor_spans", False)
+            add_span_sigs = not args.no_span_sigs and parse_bool_meta(meta, "add_span_signatures", False)
 
             def pats_of(s: str) -> Set[str]:
                 tj = tokenize_words_jieba(s)
@@ -539,15 +560,20 @@ def main() -> None:
                     tj,
                     anchors=activated,
                     max_ngram_n=max_ngram_n,
+                    add_tok_ngrams=add_tok_ngrams,
+                    add_anchor_windows=add_anchor_windows,
+                    add_skeleton=add_skeleton,
                     add_compressed_skeleton=add_cskel,
-                    add_span_patterns=add_spans,
+                    add_anchor_pairs=add_anchor_pairs,
+                    add_anchor_skip2=add_anchor_skip2,
+                    add_anchor_skip3=add_anchor_skip3,
+                    add_anchor_sequence=add_anchor_sequence,
+                    add_anchor_spans=add_anchor_spans,
                     add_span_signatures=add_span_sigs,
-                    add_anchor_skipgrams=add_skips,
                     span_max_gap=span_max_gap,
                     skip_max_jump=skip_max_jump,
-                    skip_add_trigrams=add_trigrams,
                 )
-                return {p.pattern_id for p in pats}
+                return {p.pattern_key for p in pats}
 
             examples = [
                 ("我把它扔掉", "我把你昨天用的杯子扔掉了"),
@@ -563,7 +589,7 @@ def main() -> None:
                 union = len(pa | pb)
                 print(f"\nA: {A}")
                 print(f"B: {B}")
-                print(f"  Jaccard(pattern_ids) = {j:.3f} | shared={shared} union={union}")
+                print(f"  Jaccard(pattern_keys) = {j:.3f} | shared={shared} union={union}")
 
             print("\nInterpretation:")
             print("- If Jaccard rises vs your previous report, your patterns are less length/local-context sensitive.")

@@ -11,7 +11,7 @@ Orchestrates bootstrapping with HSK DB support:
      - tokenize_chars (fallback)
   5) Build anchors (GLOBAL or LOCAL; local uses DF by default)
   6) Extract Layer-B patterns from jieba tokens; update GrammarState
-  7) Write sentences + vocab_stats + pattern_stats to SQLite
+  7) Write sentences + vocab_stats + pattern_personal_stats to SQLite
 
 New in this version:
 - Stores anchors + extractor config into meta for reproducibility.
@@ -36,10 +36,11 @@ from ..grammar.tokenize import (
     tokenize_chars,
 )
 from ..grammar.patterns import build_anchor_set, extract_patterns_from_tokens
+from ..grammar.pattern_key import family_from_key
 from ..grammar.state import GrammarState
 from ..vocab.state import count_vocab
 
-EXTRACTOR_VERSION = "patterns_v3_pairs_seq"
+EXTRACTOR_VERSION = "patterns_v4_keyed_core"
 
 
 def _load_global_anchors(path: str | Path) -> set[str]:
@@ -84,22 +85,25 @@ def bootstrap(
     # base pattern knobs
     max_ngram_n: int = 4,
 
-    # new extractor toggles (length-robust)
+    # extractor toggles (core families on by default)
+    add_tok_ngrams: bool = False,
+    add_anchor_windows: bool = True,
+    add_skeleton: bool = True,
     add_compressed_skeleton: bool = True,
-    add_span_patterns: bool = True,
-    add_span_signatures: bool = True,
-    add_anchor_skipgrams: bool = True,
     add_anchor_pairs: bool = True,
-    add_anchor_sequence: bool = True,
+    add_anchor_skip2: bool = False,
+    add_anchor_skip3: bool = False,
+    add_anchor_sequence: bool = False,
+    add_anchor_spans: bool = False,
+    add_span_signatures: bool = False,
 
-    # new extractor params
+    # extractor params
     span_max_gap: int = 20,
     skip_max_jump: int = 10,
-    skip_add_trigrams: bool = True,
 
     # grammar emergence thresholds (Layer C)
-    pattern_min_count: int = 3,
-    pattern_min_diversity: int = 2,
+    pattern_min_count_seen: int = 3,
+    pattern_min_distinct_sentences: int = 2,
 ) -> None:
     conn = connect(db_path)
     init_db(conn)
@@ -181,17 +185,20 @@ def bootstrap(
     _meta_put(conn, "include_level7", "1" if include_level7 else "0")
 
     _meta_put(conn, "max_ngram_n", max_ngram_n)
+    _meta_put(conn, "add_tok_ngrams", int(add_tok_ngrams))
+    _meta_put(conn, "add_anchor_windows", int(add_anchor_windows))
+    _meta_put(conn, "add_skeleton", int(add_skeleton))
     _meta_put(conn, "add_compressed_skeleton", int(add_compressed_skeleton))
-    _meta_put(conn, "add_span_patterns", int(add_span_patterns))
-    _meta_put(conn, "add_span_signatures", int(add_span_signatures))
-    _meta_put(conn, "add_anchor_skipgrams", int(add_anchor_skipgrams))
     _meta_put(conn, "add_anchor_pairs", int(add_anchor_pairs))
+    _meta_put(conn, "add_anchor_skip2", int(add_anchor_skip2))
+    _meta_put(conn, "add_anchor_skip3", int(add_anchor_skip3))
     _meta_put(conn, "add_anchor_sequence", int(add_anchor_sequence))
+    _meta_put(conn, "add_anchor_spans", int(add_anchor_spans))
+    _meta_put(conn, "add_span_signatures", int(add_span_signatures))
     _meta_put(conn, "span_max_gap", span_max_gap)
     _meta_put(conn, "skip_max_jump", skip_max_jump)
-    _meta_put(conn, "skip_add_trigrams", int(skip_add_trigrams))
-    _meta_put(conn, "pattern_min_count", pattern_min_count)
-    _meta_put(conn, "pattern_min_diversity", pattern_min_diversity)
+    _meta_put(conn, "pattern_min_count_seen", pattern_min_count_seen)
+    _meta_put(conn, "pattern_min_distinct_sentences", pattern_min_distinct_sentences)
     _meta_put(conn, "extractor_version", EXTRACTOR_VERSION)
 
     config_obj = {
@@ -200,17 +207,20 @@ def bootstrap(
         "anchor_method": anchor_method,
         "anchor_max_token_len": anchor_max_token_len,
         "max_ngram_n": max_ngram_n,
+        "add_tok_ngrams": add_tok_ngrams,
+        "add_anchor_windows": add_anchor_windows,
+        "add_skeleton": add_skeleton,
         "add_compressed_skeleton": add_compressed_skeleton,
-        "add_span_patterns": add_span_patterns,
-        "add_span_signatures": add_span_signatures,
-        "add_anchor_skipgrams": add_anchor_skipgrams,
         "add_anchor_pairs": add_anchor_pairs,
+        "add_anchor_skip2": add_anchor_skip2,
+        "add_anchor_skip3": add_anchor_skip3,
         "add_anchor_sequence": add_anchor_sequence,
+        "add_anchor_spans": add_anchor_spans,
+        "add_span_signatures": add_span_signatures,
         "span_max_gap": span_max_gap,
         "skip_max_jump": skip_max_jump,
-        "skip_add_trigrams": skip_add_trigrams,
-        "pattern_min_count": pattern_min_count,
-        "pattern_min_diversity": pattern_min_diversity,
+        "pattern_min_count_seen": pattern_min_count_seen,
+        "pattern_min_distinct_sentences": pattern_min_distinct_sentences,
         "hsk_db_path": str(hsk_db_path),
         "hsk_table": hsk_table,
         "hsk_max_level": hsk_max_level,
@@ -230,7 +240,10 @@ def bootstrap(
 
     conn.commit()
 
-    grammar = GrammarState(min_count=pattern_min_count, min_diversity=pattern_min_diversity)
+    grammar = GrammarState(
+        min_count_seen=pattern_min_count_seen,
+        min_distinct_sentence_count=pattern_min_distinct_sentences,
+    )
 
     # Insert sentences + patterns, update grammar state
     for s, tj, th, tc in zip(sentences, tokens_jieba_all, tokens_hsk_all, tokens_char_all):
@@ -238,15 +251,18 @@ def bootstrap(
             tj,
             anchors=anchors,
             max_ngram_n=max_ngram_n,
+            add_tok_ngrams=add_tok_ngrams,
+            add_anchor_windows=add_anchor_windows,
+            add_skeleton=add_skeleton,
             add_compressed_skeleton=add_compressed_skeleton,
-            add_span_patterns=add_span_patterns,
-            add_span_signatures=add_span_signatures,
-            add_anchor_skipgrams=add_anchor_skipgrams,
             add_anchor_pairs=add_anchor_pairs,
+            add_anchor_skip2=add_anchor_skip2,
+            add_anchor_skip3=add_anchor_skip3,
             add_anchor_sequence=add_anchor_sequence,
+            add_anchor_spans=add_anchor_spans,
+            add_span_signatures=add_span_signatures,
             span_max_gap=span_max_gap,
             skip_max_jump=skip_max_jump,
-            skip_add_trigrams=skip_add_trigrams,
         )
 
         conn.execute(
@@ -268,15 +284,14 @@ def bootstrap(
                 json.dumps(tj, ensure_ascii=False),
                 json.dumps(th, ensure_ascii=False),
                 json.dumps(tc, ensure_ascii=False),
-                json.dumps([p.pattern_id for p in pats], ensure_ascii=False),
+                json.dumps([p.pattern_key for p in pats], ensure_ascii=False),
                 skel,
                 source,
                 now,
             ),
         )
 
-        for p in pats:
-            grammar.observe(p.pattern_id, p.realization)
+        grammar.observe_sentence([(p.pattern_key, p.realization) for p in pats])
 
     conn.commit()
 
@@ -297,23 +312,23 @@ def bootstrap(
         )
 
     # Pattern stats + realizations
-    for pid, st in grammar.patterns.items():
-        mastery = st.mastery
-        diversity = st.diversity
-        emerged = 1 if st.emerged(grammar.min_count, grammar.min_diversity) else 0
+    for pkey, st in grammar.patterns.items():
+        emerged = 1 if st.emerged(grammar.min_count_seen, grammar.min_distinct_sentence_count) else 0
 
         conn.execute(
             """
-            INSERT OR REPLACE INTO pattern_stats(pattern_id, count, mastery, diversity, emerged, last_seen)
+            INSERT OR REPLACE INTO pattern_personal_stats(
+                pattern_key, family, count_seen, distinct_sentence_count, emerged, last_seen_at
+            )
             VALUES(?,?,?,?,?,?)
             """,
-            (pid, st.count, mastery, diversity, emerged, now),
+            (pkey, family_from_key(pkey), st.count_seen, st.distinct_sentence_count, emerged, now),
         )
 
         for r in st.realizations:
             conn.execute(
-                "INSERT OR IGNORE INTO pattern_realizations(pattern_id, realization) VALUES(?,?)",
-                (pid, r),
+                "INSERT OR IGNORE INTO pattern_personal_realizations(pattern_key, realization) VALUES(?,?)",
+                (pkey, r),
             )
 
     conn.commit()

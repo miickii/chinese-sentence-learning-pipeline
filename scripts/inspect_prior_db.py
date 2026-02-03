@@ -29,9 +29,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sqlite3
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -113,10 +112,11 @@ CANDIDATE_REAL_TABLES = [
 
 @dataclass
 class PatternRow:
-    pattern_id: str
-    count: int
-    diversity: int
-    log_freq: Optional[float] = None
+    pattern_key: str
+    count_sentences: int
+    count_occurrences: int
+    distinct_realization_count: int
+    p_global: Optional[float] = None
 
 
 def pick_existing_table(conn: sqlite3.Connection, preferred: str, candidates: List[str]) -> Optional[str]:
@@ -136,89 +136,93 @@ def read_top_patterns(
 ) -> List[PatternRow]:
     cols = set(table_columns(conn, stats_table))
 
-    # minimal columns required
-    if "pattern_id" not in cols or "count" not in cols:
+    key_col = "pattern_key" if "pattern_key" in cols else "pattern_id"
+    count_sent_col = "count_sentences" if "count_sentences" in cols else "count"
+    count_occ_col = "count_occurrences" if "count_occurrences" in cols else None
+    div_col = "distinct_realization_count" if "distinct_realization_count" in cols else ("diversity" if "diversity" in cols else None)
+    p_global_col = "p_global" if "p_global" in cols else None
+
+    if key_col not in cols or count_sent_col not in cols:
         raise ValueError(f"Stats table '{stats_table}' missing required columns. Has: {sorted(cols)}")
 
-    has_div = "diversity" in cols
-    has_log = "log_freq" in cols
+    select_cols = [key_col, count_sent_col]
+    if count_occ_col:
+        select_cols.append(count_occ_col)
+    if div_col:
+        select_cols.append(div_col)
+    if p_global_col:
+        select_cols.append(p_global_col)
 
-    if has_div and has_log:
-        rows = conn.execute(
-            f"""
-            SELECT pattern_id, count, diversity, log_freq
-            FROM {stats_table}
-            ORDER BY count DESC, diversity DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-        return [PatternRow(r["pattern_id"], int(r["count"]), int(r["diversity"]), float(r["log_freq"])) for r in rows]
-
-    if has_div:
-        rows = conn.execute(
-            f"""
-            SELECT pattern_id, count, diversity
-            FROM {stats_table}
-            ORDER BY count DESC, diversity DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-        return [PatternRow(r["pattern_id"], int(r["count"]), int(r["diversity"]), None) for r in rows]
-
-    # no diversity/log_freq
     rows = conn.execute(
         f"""
-        SELECT pattern_id, count
+        SELECT {", ".join(select_cols)}
         FROM {stats_table}
-        ORDER BY count DESC
+        ORDER BY {count_sent_col} DESC
         LIMIT ?
         """,
         (limit,),
     ).fetchall()
-    return [PatternRow(r["pattern_id"], int(r["count"]), 0, None) for r in rows]
+
+    out: List[PatternRow] = []
+    for r in rows:
+        out.append(
+            PatternRow(
+                pattern_key=str(r[key_col]),
+                count_sentences=int(r[count_sent_col]),
+                count_occurrences=int(r[count_occ_col]) if count_occ_col else 0,
+                distinct_realization_count=int(r[div_col]) if div_col else 0,
+                p_global=float(r[p_global_col]) if p_global_col is not None else None,
+            )
+        )
+    return out
 
 
 def count_histogram(conn: sqlite3.Connection, stats_table: str) -> Counter[int]:
-    rows = conn.execute(f"SELECT count FROM {stats_table}").fetchall()
-    return Counter(int(r["count"]) for r in rows)
+    cols = set(table_columns(conn, stats_table))
+    col = "count_sentences" if "count_sentences" in cols else "count"
+    rows = conn.execute(f"SELECT {col} AS c FROM {stats_table}").fetchall()
+    return Counter(int(r["c"]) for r in rows)
 
 
-def pattern_family(pid: str) -> str:
+def pattern_family(pkey: str) -> str:
     """
-    Infer family prefix from pattern_id.
+    Infer family prefix from pattern_key (new) or pattern_id (legacy).
     """
-    if ":" not in pid:
-        return "unknown"
-    return pid.split(":", 1)[0]
+    if "|" in pkey:
+        return pkey.split("|", 1)[0]
+    if ":" in pkey:
+        return pkey.split(":", 1)[0]
+    return "unknown"
 
 
 def family_breakdown(conn: sqlite3.Connection, stats_table: str, top_k: int = 12) -> List[Tuple[str, int]]:
-    rows = conn.execute(f"SELECT pattern_id FROM {stats_table}").fetchall()
-    c = Counter(pattern_family(r["pattern_id"]) for r in rows)
+    cols = set(table_columns(conn, stats_table))
+    key_col = "pattern_key" if "pattern_key" in cols else "pattern_id"
+    rows = conn.execute(f"SELECT {key_col} AS k FROM {stats_table}").fetchall()
+    c = Counter(pattern_family(r["k"]) for r in rows)
     return c.most_common(top_k)
 
 
 def sample_realizations(
     conn: sqlite3.Connection,
     real_table: str,
-    pid: str,
+    pkey: str,
     k: int = 6,
 ) -> List[str]:
     cols = set(table_columns(conn, real_table))
-    if "pattern_id" not in cols or "realization" not in cols:
+    key_col = "pattern_key" if "pattern_key" in cols else "pattern_id"
+    if key_col not in cols or "realization" not in cols:
         raise ValueError(f"Realizations table '{real_table}' missing required columns. Has: {sorted(cols)}")
 
     rows = conn.execute(
         f"""
         SELECT realization
         FROM {real_table}
-        WHERE pattern_id = ?
+        WHERE {key_col} = ?
         ORDER BY RANDOM()
         LIMIT ?
         """,
-        (pid, k),
+        (pkey, k),
     ).fetchall()
     return [r["realization"] for r in rows]
 
@@ -251,7 +255,7 @@ def anchors_presence_quickcheck(
     This is not perfect, but catches obvious "wrong anchors file / wrong DB".
     """
     tops = read_top_patterns(conn, stats_table, limit=200)
-    blob = "\n".join(p.pattern_id for p in tops)
+    blob = "\n".join(p.pattern_key for p in tops)
 
     hit = []
     miss = []
@@ -263,7 +267,7 @@ def anchors_presence_quickcheck(
 
     print("\n=== Anchor presence quick-check (heuristic) ===")
     print(f"Anchors provided: {len(anchors)} (checking first {min(sample_n, len(anchors))})")
-    print(f"Found in top-200 pattern_ids: {len(hit)} ({fmt_pct(len(hit), min(sample_n, len(anchors)))})")
+    print(f"Found in top-200 pattern_keys: {len(hit)} ({fmt_pct(len(hit), min(sample_n, len(anchors)))})")
     if hit:
         print("Sample hits:", hit[:40])
     if miss:
@@ -289,7 +293,7 @@ def print_hist_summary(hist: Counter[int], total_patterns: int) -> None:
     c10p = sum(v for k, v in hist.items() if k >= 10)
     c100p = sum(v for k, v in hist.items() if k >= 100)
 
-    print("Count distribution (pattern_global_stats.count):")
+    print("Count distribution (pattern_global_stats.count_sentences):")
     print(f"  count=1:    {fmt_int(c1)} ({fmt_pct(c1, total_patterns)})")
     print(f"  count=2:    {fmt_int(c2)} ({fmt_pct(c2, total_patterns)})")
     print(f"  count=3:    {fmt_int(c3)} ({fmt_pct(c3, total_patterns)})")
@@ -384,15 +388,20 @@ def main() -> None:
                 "anchors_path",
                 "anchors_count",
                 "max_ngram_n",
+                "add_tok_ngrams",
+                "add_anchor_windows",
+                "add_skeleton",
                 "span_max_gap",
                 "skip_max_jump",
-                "skip_add_trigrams",
                 "add_compressed_skeleton",
-                "add_span_patterns",
-                "add_span_signatures",
-                "add_anchor_skipgrams",
                 "add_anchor_pairs",
+                "add_anchor_skip2",
+                "add_anchor_skip3",
                 "add_anchor_sequence",
+                "add_anchor_spans",
+                "add_span_signatures",
+                "cap_realizations_per_pattern",
+                "total_df_sum",
             ]:
                 if k in meta:
                     print(f" - {k}: {meta[k]}")
@@ -419,15 +428,23 @@ def main() -> None:
         print("\n=== Top patterns by count ===")
         tops = read_top_patterns(conn, stats_table, limit=args.top)
         for i, pr in enumerate(tops, 1):
-            lf = f"{pr.log_freq:.3f}" if pr.log_freq is not None else "-"
-            print(f"{i:>2}. count={fmt_int(pr.count):>9}  div={fmt_int(pr.diversity):>6}  log_freq={lf:>7}   {pr.pattern_id}")
+            pg = f"{pr.p_global:.4f}" if pr.p_global is not None else "-"
+            print(
+                f"{i:>2}. df={fmt_int(pr.count_sentences):>9}  "
+                f"occ={fmt_int(pr.count_occurrences):>9}  "
+                f"real={fmt_int(pr.distinct_realization_count):>6}  "
+                f"p={pg:>7}   {pr.pattern_key}"
+            )
 
         # Show realizations if requested and table exists
         if args.show_realizations and real_table is not None:
             print("\n=== Sample realizations (random) ===")
             for pr in tops[: min(12, len(tops))]:
-                print(f"\n- {pr.pattern_id} | count={fmt_int(pr.count)} div={fmt_int(pr.diversity)}")
-                exs = sample_realizations(conn, real_table, pr.pattern_id, k=args.sample_real)
+                print(
+                    f"\n- {pr.pattern_key} | df={fmt_int(pr.count_sentences)} "
+                    f"occ={fmt_int(pr.count_occurrences)} real={fmt_int(pr.distinct_realization_count)}"
+                )
+                exs = sample_realizations(conn, real_table, pr.pattern_key, k=args.sample_real)
                 for e in exs:
                     print("    •", e)
 
