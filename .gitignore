@@ -1,0 +1,32 @@
+# --- Local corpora / generated artifacts ---
+data/
+data/**
+
+# If you have other big generated folders:
+# outputs/
+# artifacts/
+
+# --- WikiExtractor (vendored / cloned tool) ---
+wikiextractor/
+wikiextractor/**
+
+# --- Python / env / OS noise (optional but recommended) ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+.venv/
+venv/
+.env/
+.env.*
+
+# Conda (optional: ignore local env folder if you ever create one in-repo)
+conda/
+.envs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
