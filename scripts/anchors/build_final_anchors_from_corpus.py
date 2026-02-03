@@ -45,8 +45,8 @@ Usage
 -----
 PYTHONPATH=src python scripts/build_final_anchors_from_corpus.py \
   --candidates data/global_anchors.core_candidates.json \
-  --corpus data/combined_corpus_simplified.txt \
-  --out data/global_anchors.final.json \
+  --corpus data/processed/global_prior.sentences.txt \
+  --out data/global_anchors.final_v2.json \
   --topk 600 \
   --min-df 50 \
   --min-df-rate 0.0005 \
